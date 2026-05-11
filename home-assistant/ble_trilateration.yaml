@@ -1,0 +1,186 @@
+# ble_trilateration.yaml — OPTIONAL
+#
+# A continuous 2D position sensor for one person, derived from inverse-
+# square-weighted RSSI across all your ESP32 BLE proxy boards.
+#
+# This is the "smooth live-map" sensor — for a stable committed room,
+# use `committed_room_single_person.yaml` instead. This sensor produces
+# a wobbly real-time (x, y, floor) tuple suitable for a live map view
+# where smooth motion matters more than precision.
+#
+# How it works:
+#   - Each ESP32 board exposes a `<beacon>_rssi` sensor (per the ESPHome
+#     `presence-room.example.yaml`)
+#   - Convert RSSI → distance via the log-distance path-loss model:
+#         d = 10 ^ ((REF_POWER - rssi) / (10 * N))
+#     REF_POWER is your beacon's measured RSSI at 1m (calibrate per
+#     beacon — see ../docs/calibrate.md). N is the path-loss exponent
+#     (~2.0 in free space, ~2.5 in a typical home).
+#   - Compute centroid weighted by 1/d² across all boards that have a
+#     fix
+#   - Output (x, y, floor) where (x, y) is in the house coordinate frame
+#     and floor is the floor of the strongest-RSSI board
+#
+# Adapt to your house:
+#   1. Replace each `(entity, x, y, floor, room)` tuple below with your
+#      board's HA entity name and its physical (x, y, floor) in your
+#      house's coordinate frame
+#   2. Calibrate REF_POWER (-58 dBm here is one specific beacon's
+#      measured 1m RSSI — yours WILL differ)
+#   3. Adjust N if your house has more/fewer walls than typical (more
+#      walls → higher N, e.g. 2.7-3.0)
+#
+# Drop into your `template:` section.
+
+template:
+  - trigger:
+      - platform: state
+        entity_id:
+          # One per ESP32 board, replace with your board entity names
+          - sensor.presence_node_living_room_watch_rssi
+          - sensor.presence_node_office_watch_rssi
+          - sensor.presence_node_bedroom_watch_rssi
+          - sensor.presence_node_kitchen_watch_rssi
+          - sensor.presence_node_hallway_watch_rssi
+          - sensor.presence_node_library_watch_rssi
+    sensor:
+      - name: "Person A Position"
+        unique_id: person_a_position
+        icon: mdi:crosshairs-gps
+        state: >-
+          {#- (entity, x_metres, y_metres, floor_index, room_label)
+              x/y are in YOUR coordinate frame. Pick an origin (e.g.
+              SW corner of ground floor), measure each board's position,
+              fill in here. Floor indices are arbitrary integers (0 =
+              ground, 1 = first, etc). -#}
+          {% set boards = [
+            ('sensor.presence_node_living_room_watch_rssi', 0.20, 7.35, 0, 'Living Room'),
+            ('sensor.presence_node_office_watch_rssi',      2.59, 2.36, 1, 'Office'),
+            ('sensor.presence_node_bedroom_watch_rssi',     1.70, 5.82, 1, 'Bedroom'),
+            ('sensor.presence_node_kitchen_watch_rssi',     4.51, -3.15, 0, 'Kitchen'),
+            ('sensor.presence_node_hallway_watch_rssi',     4.62, 3.62, 0, 'Hallway'),
+            ('sensor.presence_node_library_watch_rssi',     3.48, 1.69, 0, 'Library')
+          ] %}
+          {#- REF_POWER = beacon's measured RSSI at exactly 1m. Calibrate
+              per device (see ../docs/calibrate.md → "REF_POWER capture").
+              N = path-loss exponent. 2.5 is a typical home; tune if your
+              walls are unusually thick / thin / many. -#}
+          {% set REF_POWER = -58 %}
+          {% set N = 2.5 %}
+          {% set ns = namespace(sw=0.0, swx=0.0, swy=0.0, best_rssi=-999, best_floor=0) %}
+          {% for entity, bx, by, floor, room in boards %}
+            {% set raw = states(entity) %}
+            {% if raw not in ['unknown','unavailable','None',None] %}
+              {% set rssi = raw | float(-127) %}
+              {% if rssi > -110 %}
+                {# distance (m) via log-distance path loss #}
+                {% set d = 10 ** ((REF_POWER - rssi) / (10 * N)) %}
+                {% set d = [d, 0.3] | max %}    {# floor at 30cm to stop singularity #}
+                {% set w = 1.0 / (d * d) %}
+                {% set ns.sw = ns.sw + w %}
+                {% set ns.swx = ns.swx + w * bx %}
+                {% set ns.swy = ns.swy + w * by %}
+                {% if rssi > ns.best_rssi %}
+                  {% set ns.best_rssi = rssi %}
+                  {% set ns.best_floor = floor %}
+                {% endif %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.sw > 0 %}
+          {{ (ns.swx / ns.sw) | round(2) }},{{ (ns.swy / ns.sw) | round(2) }},{{ ns.best_floor }}
+          {% else %}
+          unknown
+          {% endif %}
+
+        attributes:
+          # Useful for live-map rendering: x, y, floor, strongest-room
+          # exposed individually so a Lovelace card can read them cleanly.
+          x: >-
+            {% set boards = [
+              ('sensor.presence_node_living_room_watch_rssi', 0.20, 7.35),
+              ('sensor.presence_node_office_watch_rssi',      2.59, 2.36),
+              ('sensor.presence_node_bedroom_watch_rssi',     1.70, 5.82),
+              ('sensor.presence_node_kitchen_watch_rssi',     4.51, -3.15),
+              ('sensor.presence_node_hallway_watch_rssi',     4.62, 3.62),
+              ('sensor.presence_node_library_watch_rssi',     3.48, 1.69)
+            ] %}
+            {% set ns = namespace(sw=0.0, swx=0.0) %}
+            {% for entity, bx, by in boards %}
+              {% set raw = states(entity) %}
+              {% if raw not in ['unknown','unavailable','None',None] %}
+                {% set rssi = raw | float(-127) %}
+                {% if rssi > -110 %}
+                  {% set d = [10 ** ((-58 - rssi) / 25), 0.3] | max %}
+                  {% set w = 1.0 / (d * d) %}
+                  {% set ns.sw = ns.sw + w %}
+                  {% set ns.swx = ns.swx + w * bx %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ (ns.swx / ns.sw) | round(3) if ns.sw > 0 else none }}
+          y: >-
+            {% set boards = [
+              ('sensor.presence_node_living_room_watch_rssi', 0.20, 7.35),
+              ('sensor.presence_node_office_watch_rssi',      2.59, 2.36),
+              ('sensor.presence_node_bedroom_watch_rssi',     1.70, 5.82),
+              ('sensor.presence_node_kitchen_watch_rssi',     4.51, -3.15),
+              ('sensor.presence_node_hallway_watch_rssi',     4.62, 3.62),
+              ('sensor.presence_node_library_watch_rssi',     3.48, 1.69)
+            ] %}
+            {% set ns = namespace(sw=0.0, swy=0.0) %}
+            {% for entity, bx, by in boards %}
+              {% set raw = states(entity) %}
+              {% if raw not in ['unknown','unavailable','None',None] %}
+                {% set rssi = raw | float(-127) %}
+                {% if rssi > -110 %}
+                  {% set d = [10 ** ((-58 - rssi) / 25), 0.3] | max %}
+                  {% set w = 1.0 / (d * d) %}
+                  {% set ns.sw = ns.sw + w %}
+                  {% set ns.swy = ns.swy + w * by %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ (ns.swy / ns.sw) | round(3) if ns.sw > 0 else none }}
+          floor: >-
+            {% set boards = [
+              ('sensor.presence_node_living_room_watch_rssi', 0),
+              ('sensor.presence_node_office_watch_rssi',      1),
+              ('sensor.presence_node_bedroom_watch_rssi',     1),
+              ('sensor.presence_node_kitchen_watch_rssi',     0),
+              ('sensor.presence_node_hallway_watch_rssi',     0),
+              ('sensor.presence_node_library_watch_rssi',     0)
+            ] %}
+            {% set ns = namespace(best_rssi=-999, best_floor=0) %}
+            {% for entity, floor in boards %}
+              {% set raw = states(entity) %}
+              {% if raw not in ['unknown','unavailable','None',None] %}
+                {% set rssi = raw | float(-127) %}
+                {% if rssi > ns.best_rssi %}
+                  {% set ns.best_rssi = rssi %}
+                  {% set ns.best_floor = floor %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.best_floor }}
+          strongest_room: >-
+            {% set boards = [
+              ('sensor.presence_node_living_room_watch_rssi', 'Living Room'),
+              ('sensor.presence_node_office_watch_rssi',      'Office'),
+              ('sensor.presence_node_bedroom_watch_rssi',     'Bedroom'),
+              ('sensor.presence_node_kitchen_watch_rssi',     'Kitchen'),
+              ('sensor.presence_node_hallway_watch_rssi',     'Hallway'),
+              ('sensor.presence_node_library_watch_rssi',     'Library')
+            ] %}
+            {% set ns = namespace(best_rssi=-999, best='unknown') %}
+            {% for entity, room in boards %}
+              {% set raw = states(entity) %}
+              {% if raw not in ['unknown','unavailable','None',None] %}
+                {% set rssi = raw | float(-127) %}
+                {% if rssi > ns.best_rssi %}
+                  {% set ns.best_rssi = rssi %}
+                  {% set ns.best = room %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.best }}

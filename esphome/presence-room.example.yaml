@@ -1,0 +1,108 @@
+# Presence node — BLE-only template.
+#
+# Drop this onto an ESP32 to add one room to your presence mesh. The
+# board does two things:
+#   1. Acts as a `bluetooth_proxy` for Home Assistant — relays any BLE
+#      advertisements it sees, so HA's Bermuda integration can use them
+#      for trilateration AND HA's built-in Private BLE Device integration
+#      can resolve them via IRK.
+#   2. Exposes per-beacon RSSI sensors directly to HA — useful for the
+#      optional `ble_trilateration.yaml` centroid sensor, and for any
+#      threshold-based proximity automations (e.g. "phone is close to
+#      this board" → light on).
+#
+# Duplicate this file once per room, set `name` and `friendly_name` per
+# room (`presence-office`, `presence-kitchen`, etc).
+#
+# For the radar-equipped variant, see `presence-room-with-radar.example.yaml`.
+
+substitutions:
+  # Adapt these two per room.
+  name: presence-room
+  friendly_name: "Presence Node — Room"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: false
+  min_version: 2024.11.0
+
+# Classic ESP32 dev board (DevKit V1 / NodeMCU-32S clones, ~£6).
+# Arduino framework, NOT esp-idf — see docs/gotchas.md for the
+# errno=128 story (ESP-IDF + bluetooth_proxy currently loops on
+# certain dev-board MAC frames).
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+  level: INFO
+  baud_rate: 0       # disable serial logging once flashed via OTA
+
+api:
+  encryption:
+    key: !secret presence_node_api_key
+
+ota:
+  - platform: esphome
+    password: !secret presence_node_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${name}"
+    password: !secret presence_node_ota_password
+
+captive_portal:
+
+# ── BLE side: bluetooth_proxy + per-beacon RSSI sensors ─────────────
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+
+bluetooth_proxy:
+  active: true
+
+sensor:
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  # ── Direct-to-HA per-beacon RSSI sensors ────────────────────────────
+  # Replace the iBeacon UUIDs below with whatever your devices broadcast.
+  # If you don't have any iBeacon broadcasters in the household yet, see
+  # docs/capture-irk.md — the IRK path doesn't need iBeacon at all; the
+  # RSSI sensors here are an optional add-on for trilateration / threshold
+  # automations.
+  #
+  # Tip: a free Android app like "BLE Beacon" or "Beacon Tools" can
+  # broadcast iBeacon for testing without writing any client code.
+
+  - platform: ble_rssi
+    ibeacon_uuid: "<watch-uuid>"     # e.g. a UUID you generate per device
+    ibeacon_major: 100
+    ibeacon_minor: 40004
+    name: "Watch RSSI"
+    filters:
+      - heartbeat: 2s
+      - timeout:
+          timeout: 15s
+          value: -127
+
+  - platform: ble_rssi
+    ibeacon_uuid: "<phone-uuid>"
+    ibeacon_major: 100
+    ibeacon_minor: 40004
+    name: "Phone RSSI"
+    filters:
+      - heartbeat: 2s
+      - timeout:
+          timeout: 15s
+          value: -127

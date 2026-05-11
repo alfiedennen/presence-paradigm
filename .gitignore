@@ -1,0 +1,22 @@
+# NEVER commit
+secrets.yaml
+.env
+*.irk
+*_irk.txt
+*_irks.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local notes
+NOTES.md
+TODO.md
+
+# ESPHome build artefacts (in case anyone runs `esphome run` from inside the repo)
+.esphome/
+build/

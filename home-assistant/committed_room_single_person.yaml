@@ -1,0 +1,171 @@
+# committed_room_single_person.yaml
+#
+# Reference template sensor for a single-person household.
+#
+# Computes `sensor.person_a_committed_room` — a stable, debounced answer
+# to "which room is Person A in right now?" by fusing:
+#
+#   1. RADAR OVERRIDES (highest priority — ground truth when present)
+#      Per-room radar binary sensors that say "yes, a body IS in this
+#      room right now". Beats all BLE evidence.
+#
+#   2. BLE-IRK identity (next priority)
+#      The Private BLE Device integration's resolved area for each of
+#      the person's wearables. Survives MAC rotation, deep sleep, and
+#      most of what defeats naïve BLE tracking.
+#
+#   3. Nearest-MAC fallback (last resort)
+#      When neither IRK nor area resolution has a fix yet (e.g. just
+#      after a MAC rotation), use the strongest-RSSI ESP32 board's
+#      home room as a coarse hint.
+#
+#   4. Hold-last + GPS away override
+#      When BLE goes silent but GPS / WiFi-zone says home → hold last
+#      committed room. When both BLE and GPS say away → 'away'.
+#
+# Adapt to your house:
+#   - Edit the `ba` map (BLE area → display name) for your room labels
+#   - Edit the `m` map (MAC → home room) for your ESP32 boards
+#   - Edit the radar override entity IDs
+#   - Edit the `rooms`, `non_transit` lists for your room set
+#
+# This file lives at e.g. `homeassistant/packages/presence/committed_room.yaml`
+# or merged into `configuration.yaml` under the `template:` block.
+
+template:
+  - trigger:
+      # Re-evaluate any time something relevant changes
+      - platform: state
+        entity_id:
+          # IRK area sensors — replace with your Private BLE Device entity IDs
+          - sensor.person_a_phone_ble_area
+          - sensor.person_a_watch_ble_area
+          # Per-room radar overrides — one per room with a radar
+          - binary_sensor.office_person_a_present
+          - binary_sensor.office_person_a_at_desk
+          - binary_sensor.library_person_a_present
+          - binary_sensor.living_room_person_a_present
+          - binary_sensor.kitchen_person_a_present
+          # GPS / WiFi-zone tracker (optional — for the away override)
+          - device_tracker.person_a_phone_ble
+          - device_tracker.person_a_watch_ble
+      - platform: time_pattern
+        seconds: "/15"
+
+    sensor:
+      - name: "Person A Committed Room"
+        unique_id: person_a_committed_room
+        icon: mdi:map-marker-account
+        state: >-
+          {#- ─── 1. RADAR OVERRIDES (ground-truth, beats all BLE fusion) ───
+              Priority order matters when delay_off windows overlap:
+                1. office_at_desk    — most specific (Person A seated at desk)
+                2. kitchen present   — radar physically sees them NOW.
+                                       Beats stale office-present from a
+                                       recent visit (2-min delay_off).
+                3. library, living room, office — generic per-room cones.
+              All have delay_off on the underlying sensors so they don't
+              flicker on transient gaps. -#}
+          {%- if is_state('binary_sensor.office_person_a_at_desk', 'on') -%}
+          Office
+          {%- elif is_state('binary_sensor.kitchen_person_a_present', 'on') -%}
+          Kitchen
+          {%- elif is_state('binary_sensor.library_person_a_present', 'on') -%}
+          Library
+          {%- elif is_state('binary_sensor.living_room_person_a_present', 'on') -%}
+          Living Room
+          {%- elif is_state('binary_sensor.office_person_a_present', 'on') -%}
+          Office
+          {%- else -%}
+
+          {#- ─── 2. BLE-IRK area resolution ─── -#}
+          {%- set phone_tracker = states('device_tracker.person_a_phone_ble') -%}
+          {%- set watch_tracker = states('device_tracker.person_a_watch_ble') -%}
+
+          {#- Map your Bermuda / Private BLE Device area names → display names.
+              Multiple BLE areas can collapse to the same display room
+              (e.g. both offices → "Office"). -#}
+          {%- set ba = {
+            'kitchen':       'Kitchen',
+            'living_room':   'Living Room',
+            'library':       'Library',
+            'bedroom':       'Bedroom',
+            'front_hallway': 'Hallway',
+            'office':        'Office',
+          } -%}
+          {%- set watch_area = (states('sensor.person_a_watch_ble_area') or '') | lower | replace(' ', '_') -%}
+          {%- set phone_area = (states('sensor.person_a_phone_ble_area') or '') | lower | replace(' ', '_') -%}
+          {%- set watch_via_ble = ba.get(watch_area) -%}
+          {%- set phone_via_ble = ba.get(phone_area) -%}
+
+          {#- ─── 3. Nearest-MAC fallback ─── -#}
+          {#- When BLE area resolution hasn't caught up yet (post-MAC
+              rotation), use the strongest-RSSI board's home room as a
+              hint. Replace these MAC addresses with your own ESP32
+              boards' WiFi MACs. Get them from HA → Settings → Devices →
+              ESPHome → <board> → "About". -#}
+          {%- set m = {
+            'AA:BB:CC:DD:EE:01': 'Living Room',
+            'AA:BB:CC:DD:EE:02': 'Office',
+            'AA:BB:CC:DD:EE:03': 'Kitchen',
+            'AA:BB:CC:DD:EE:04': 'Bedroom',
+            'AA:BB:CC:DD:EE:05': 'Hallway',
+            'AA:BB:CC:DD:EE:06': 'Library',
+          } -%}
+          {%- set phone_src = state_attr('device_tracker.person_a_phone_ble','source') -%}
+          {%- set watch_src = state_attr('device_tracker.person_a_watch_ble','source') -%}
+          {%- set watch_via_mac = m.get(watch_src) -%}
+          {%- set phone_via_mac = m.get(phone_src) -%}
+
+          {#- Pick the best available candidate, in priority order. -#}
+          {%- set candidate =
+              watch_via_ble
+              or phone_via_ble
+              or watch_via_mac
+              or phone_via_mac -%}
+
+          {#- ─── 4. Hold-last + away override ─── -#}
+          {%- set previous = this.state if this is not none else 'unknown' -%}
+          {%- set rooms = ['Living Room','Office','Kitchen','Bedroom','Hallway','Library'] -%}
+          {%- set non_transit = ['Living Room','Kitchen','Bedroom','Library','Office'] -%}
+          {%- set seconds_in_state = (now() - this.last_changed).total_seconds() if this is not none else 999 -%}
+
+          {#- Replace `person.person_a` with the actual HA Person entity for
+              this household member. -#}
+          {%- set person_home = is_state('person.person_a', 'home') -%}
+          {%- set tracker = 'home' if (watch_tracker == 'home' or phone_tracker == 'home') else 'not_home' -%}
+
+          {#- Both away → away -#}
+          {%- if tracker == 'not_home' and not person_home -%}
+          away
+          {#- BLE silent but GPS says home → hold last room -#}
+          {%- elif tracker == 'not_home' -%}
+            {%- if previous in rooms -%}{{ previous }}
+            {%- else -%}unknown
+            {%- endif -%}
+          {#- Have a candidate from BLE → use it, but suppress hallway
+              transits (don't commit to "Hallway" if last room was a
+              real room and we've only been in hallway < 30s) -#}
+          {%- elif candidate -%}
+            {%- if candidate == 'Hallway'
+                  and previous in non_transit
+                  and seconds_in_state < 30 -%}
+              {{ previous }}
+            {%- else -%}
+              {{ candidate }}
+            {%- endif -%}
+          {%- else -%}
+          unknown
+          {%- endif -%}
+          {%- endif -%}
+
+        attributes:
+          # Useful for debugging the fusion in HA's developer tools
+          watch_ble_area: "{{ states('sensor.person_a_watch_ble_area') }}"
+          phone_ble_area: "{{ states('sensor.person_a_phone_ble_area') }}"
+          watch_tracker: "{{ states('device_tracker.person_a_watch_ble') }}"
+          phone_tracker: "{{ states('device_tracker.person_a_phone_ble') }}"
+          radar_office_at_desk: "{{ states('binary_sensor.office_person_a_at_desk') }}"
+          radar_kitchen: "{{ states('binary_sensor.kitchen_person_a_present') }}"
+          radar_library: "{{ states('binary_sensor.library_person_a_present') }}"
+          radar_living_room: "{{ states('binary_sensor.living_room_person_a_present') }}"

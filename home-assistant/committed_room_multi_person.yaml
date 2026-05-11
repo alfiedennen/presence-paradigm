@@ -1,0 +1,129 @@
+# committed_room_multi_person.yaml
+#
+# Reference template sensors for a multi-person household. Produces:
+#   - sensor.person_a_committed_room
+#   - sensor.person_b_committed_room
+#
+# Each is independent — same fusion logic, different inputs. Per-person
+# radar overrides require per-person radar binary sensors (the LD2450
+# itself is identity-blind; you derive per-person presence by AND-ing
+# the radar's "body present" with that person's BLE area).
+#
+# This is the simpler shape — for the deeply-tuned variant with
+# hallway-transit suppression, GPS away override, manual override
+# input_text, and post-23:00 bedroom-default for one inhabitant only,
+# see the haroldathome.com private repo's `configuration.yaml` (it's
+# the same pattern, with extra household-specific overrides).
+
+template:
+  # ─────────────────────────────────────────────────────────────────────
+  # PERSON A
+  # ─────────────────────────────────────────────────────────────────────
+  - trigger:
+      - platform: state
+        entity_id:
+          - sensor.person_a_phone_ble_area
+          - sensor.person_a_watch_ble_area
+          - binary_sensor.office_person_a_present
+          - binary_sensor.library_person_a_present
+          - binary_sensor.living_room_person_a_present
+          - binary_sensor.kitchen_person_a_present
+          - device_tracker.person_a_phone_ble
+          - device_tracker.person_a_watch_ble
+      - platform: time_pattern
+        seconds: "/15"
+    sensor:
+      - name: "Person A Committed Room"
+        unique_id: person_a_committed_room
+        icon: mdi:map-marker-account
+        state: >-
+          {%- if is_state('binary_sensor.kitchen_person_a_present', 'on') -%}Kitchen
+          {%- elif is_state('binary_sensor.library_person_a_present', 'on') -%}Library
+          {%- elif is_state('binary_sensor.living_room_person_a_present', 'on') -%}Living Room
+          {%- elif is_state('binary_sensor.office_person_a_present', 'on') -%}Office
+          {%- else -%}
+            {%- set ba = {
+              'kitchen': 'Kitchen', 'living_room': 'Living Room',
+              'library': 'Library', 'bedroom': 'Bedroom',
+              'front_hallway': 'Hallway', 'office': 'Office',
+            } -%}
+            {%- set watch_area = (states('sensor.person_a_watch_ble_area') or '') | lower | replace(' ', '_') -%}
+            {%- set phone_area = (states('sensor.person_a_phone_ble_area') or '') | lower | replace(' ', '_') -%}
+            {%- set candidate = ba.get(watch_area) or ba.get(phone_area) -%}
+            {%- set previous = this.state if this is not none else 'unknown' -%}
+            {%- set tracker_home = is_state('device_tracker.person_a_phone_ble', 'home')
+                                 or is_state('device_tracker.person_a_watch_ble', 'home') -%}
+            {%- if not tracker_home and not is_state('person.person_a','home') -%}away
+            {%- elif candidate -%}{{ candidate }}
+            {%- elif previous in ba.values() -%}{{ previous }}
+            {%- else -%}unknown
+            {%- endif -%}
+          {%- endif -%}
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PERSON B
+  # ─────────────────────────────────────────────────────────────────────
+  - trigger:
+      - platform: state
+        entity_id:
+          - sensor.person_b_phone_ble_area
+          - sensor.person_b_watch_ble_area
+          - binary_sensor.office_person_b_present
+          - binary_sensor.library_person_b_present
+          - binary_sensor.living_room_person_b_present
+          - binary_sensor.kitchen_person_b_present
+          - device_tracker.person_b_phone_ble
+          - device_tracker.person_b_watch_ble
+      - platform: time_pattern
+        seconds: "/15"
+    sensor:
+      - name: "Person B Committed Room"
+        unique_id: person_b_committed_room
+        icon: mdi:map-marker-account
+        state: >-
+          {%- if is_state('binary_sensor.kitchen_person_b_present', 'on') -%}Kitchen
+          {%- elif is_state('binary_sensor.library_person_b_present', 'on') -%}Library
+          {%- elif is_state('binary_sensor.living_room_person_b_present', 'on') -%}Living Room
+          {%- elif is_state('binary_sensor.office_person_b_present', 'on') -%}Office
+          {%- else -%}
+            {%- set ba = {
+              'kitchen': 'Kitchen', 'living_room': 'Living Room',
+              'library': 'Library', 'bedroom': 'Bedroom',
+              'front_hallway': 'Hallway', 'office': 'Office',
+            } -%}
+            {%- set watch_area = (states('sensor.person_b_watch_ble_area') or '') | lower | replace(' ', '_') -%}
+            {%- set phone_area = (states('sensor.person_b_phone_ble_area') or '') | lower | replace(' ', '_') -%}
+            {%- set candidate = ba.get(watch_area) or ba.get(phone_area) -%}
+            {%- set previous = this.state if this is not none else 'unknown' -%}
+            {%- set tracker_home = is_state('device_tracker.person_b_phone_ble', 'home')
+                                 or is_state('device_tracker.person_b_watch_ble', 'home') -%}
+            {%- if not tracker_home and not is_state('person.person_b','home') -%}away
+            {%- elif candidate -%}{{ candidate }}
+            {%- elif previous in ba.values() -%}{{ previous }}
+            {%- else -%}unknown
+            {%- endif -%}
+          {%- endif -%}
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-person room presence (template binary sensors)
+# ─────────────────────────────────────────────────────────────────────
+# These derive per-person presence from (radar fires) AND (that person's
+# BLE area says they're in this room). Without the AND, the radar can
+# only tell you a body is present — not whose.
+#
+# Pattern, repeat per (person, room):
+#
+# binary_sensor:
+#   - platform: template
+#     sensors:
+#       office_person_a_present:
+#         friendly_name: "Office — Person A present"
+#         delay_off:
+#           minutes: 2
+#         value_template: >-
+#           {{ is_state('binary_sensor.presence_office_radar_presence', 'on')
+#              and states('sensor.person_a_phone_ble_area') | lower == 'office'
+#                or states('sensor.person_a_watch_ble_area') | lower == 'office' }}
+#
+# Repeat for:
+#   {office, library, living_room, kitchen} × {person_a, person_b}

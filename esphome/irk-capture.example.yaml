@@ -1,0 +1,86 @@
+# IRK Capture firmware — temporary single-purpose use.
+#
+# Flashes onto a spare (or borrowed) ESP32 to capture Identity Resolving
+# Keys from iOS / Android / Apple Watch devices. Once you have the IRKs
+# you want, REFLASH the board back to its normal duty
+# (presence-room.example.yaml) — leaving an IRK-capture firmware running
+# in your house is bad practice (it's a pairing surface).
+#
+# CRITICAL — framework: this firmware uses ESP-IDF, NOT Arduino. The
+# normal presence-room firmware uses Arduino because of an errno=128
+# loop with bluetooth_proxy under ESP-IDF on certain dev-board MAC
+# frames (see docs/gotchas.md). That bug doesn't apply here — this
+# firmware does NOT run bluetooth_proxy, only BLE bonding for the
+# IRK exchange.
+#
+# Procedure: see docs/capture-irk.md.
+
+esphome:
+  name: irk-capture
+  friendly_name: "IRK Capture"
+  min_version: 2024.11.0
+  on_boot:
+    # Default to "Heart Sensor" profile — iOS pairs cleanly without a
+    # PIN prompt in this mode (the Apple Watch's Health app finds it).
+    # Runs after setup completes, before the first advertising cycle,
+    # so the board comes up in the right profile.
+    priority: -100
+    then:
+      - delay: 1s
+      - select.set:
+          id: ble_profile_select
+          option: "Heart Sensor"
+
+esp32:
+  board: esp32dev
+  variant: esp32
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+  baud_rate: 115200    # keep serial logging — useful during capture
+
+api:
+  encryption:
+    key: !secret presence_node_api_key
+
+ota:
+  - platform: esphome
+    password: !secret presence_node_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "irk-capture"
+    password: !secret presence_node_ota_password
+
+captive_portal:
+
+external_components:
+  - source: github://DerekSeaman/irk-capture@main
+    components: [ irk_capture ]
+
+irk_capture:
+  id: irk
+
+# Expose profile selector + capture sensors as HA entities.
+# - "Heart Sensor" profile (default) → for iOS / Apple Watch
+# - "Generic Access" profile          → for Android phones / watches
+# - Switch profiles via the Select entity in HA, then re-pair from the
+#   target device.
+select:
+  - platform: irk_capture
+    irk_capture_id: irk
+    ble_profile:
+      id: ble_profile_select
+      name: "BLE Profile"
+
+text_sensor:
+  - platform: irk_capture
+    irk_capture_id: irk
+    last_irk:
+      name: "Last IRK"
+    last_address:
+      name: "Last Identity Address"
